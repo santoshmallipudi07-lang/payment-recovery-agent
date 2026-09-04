@@ -1,0 +1,6 @@
+fastapi
+uvicorn
+razorpay
+python-dotenv
+supabase
+google-generativeai
