@@ -2,16 +2,12 @@ import os
 from fastapi import FastAPI, Request
 from dotenv import load_dotenv
 from supabase import create_client
+from act import act_on_payment
 
-# This reads your .env file and makes RAZORPAY_KEY_ID, SUPABASE_URL, etc.
-# available to this code via os.environ.get(...)
 load_dotenv()
 
-# Read your Supabase credentials from .env
 SUPABASE_URL = os.environ.get("SUPABASE_URL")
 SUPABASE_SERVICE_KEY = os.environ.get("SUPABASE_SERVICE_KEY")
-
-# Create a connected client we can use to talk to your Supabase database
 supabase = create_client(SUPABASE_URL, SUPABASE_SERVICE_KEY)
 
 app = FastAPI()
@@ -26,11 +22,8 @@ def health_check():
 async def razorpay_webhook(request: Request):
     payload = await request.json()
 
-    # Reach into the nested JSON Razorpay sends us to get just the
-    # actual payment details (id, amount, failure reason, etc.)
     payment_data = payload["payload"]["payment"]["entity"]
 
-    # Build a clean record matching our failed_payments table columns
     record = {
         "payment_id": payment_data.get("id"),
         "amount": payment_data.get("amount"),
@@ -39,9 +32,22 @@ async def razorpay_webhook(request: Request):
         "method": payment_data.get("method"),
     }
 
-    # Actually save this record into the failed_payments table in Supabase
-    supabase.table("failed_payments").insert(record).execute()
-
+    # Save the failure first, same as before
+    insert_result = supabase.table("failed_payments").insert(record).execute()
     print("Saved failed payment to Supabase:", record)
+
+    # NEW: immediately run the Decide + Act step on this exact payment,
+    # instead of waiting for run_batch.py to be run manually later.
+    # insert_result.data[0] gives us back the full saved row, including
+    # its real id and default status/retry_count, which act_on_payment needs.
+    try:
+        saved_payment = insert_result.data[0]
+        act_on_payment(saved_payment)
+        print(f"Acted on payment {saved_payment['id'][:8]}... automatically.")
+    except Exception as e:
+        # If the AI/Act step fails for any reason, we don't want that to
+        # break the webhook response back to Razorpay - the payment is
+        # still safely saved either way, just not yet acted on.
+        print(f"Act step failed for this payment: {e}")
 
     return {"status": "received"}
